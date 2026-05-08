@@ -20,6 +20,21 @@ const STORAGE_KEY = "procureai_knowledge_files";
 const IDB_NAME = "procureai_kb";
 const IDB_STORE = "files";
 
+const SUPPORTED_MIME_TYPES = [
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "text/html",
+  "text/markdown",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+];
+
+const SUPPORTED_EXTENSIONS = ".pdf,.txt,.csv,.html,.md,.png,.jpg,.jpeg,.webp";
+
 const openKbDatabase = () => {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(IDB_NAME, 1);
@@ -171,6 +186,11 @@ const App = () => {
     const file = e.target.files[0];
     if (!file) return;
     if (kbFileInputRef.current) kbFileInputRef.current.value = '';
+
+    if (!SUPPORTED_MIME_TYPES.includes(file.type)) {
+      setUploadError(`Format "${file.name.split('.').pop()}" tidak didukung Gemini. Gunakan: PDF, TXT, CSV, HTML, MD, atau gambar (PNG/JPG/WebP).`);
+      return;
+    }
 
     setIsUploading(true);
     setUploadError(null);
@@ -450,7 +470,7 @@ Fokus pada solusi yang sesuai aturan hukum dan pedoman SCM.${kbContext}`;
                 type="file"
                 ref={kbFileInputRef}
                 onChange={handleKbUpload}
-                accept=".pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.png,.jpg,.jpeg"
+                accept={SUPPORTED_EXTENSIONS}
                 className="hidden"
               />
             </div>
