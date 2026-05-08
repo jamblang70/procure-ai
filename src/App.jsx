@@ -17,20 +17,68 @@ const API_KEY = getApiKey();
 const MODEL_NAME = "gemini-2.5-flash";
 const FILES_API_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const STORAGE_KEY = "procureai_knowledge_files";
+const IDB_NAME = "procureai_kb";
+const IDB_STORE = "files";
+
+const openKbDatabase = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(IDB_NAME, 1);
+    request.onupgradeneeded = (e) => {
+      e.target.result.createObjectStore(IDB_STORE);
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+};
+
+const saveFileToIDB = async (id, file) => {
+  const db = await openKbDatabase();
+  const tx = db.transaction(IDB_STORE, "readwrite");
+  tx.objectStore(IDB_STORE).put({ blob: file, name: file.name, type: file.type, size: file.size }, id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+const getFileFromIDB = async (id) => {
+  const db = await openKbDatabase();
+  const tx = db.transaction(IDB_STORE, "readonly");
+  const request = tx.objectStore(IDB_STORE).get(id);
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const deleteFileFromIDB = async (id) => {
+  const db = await openKbDatabase();
+  const tx = db.transaction(IDB_STORE, "readwrite");
+  tx.objectStore(IDB_STORE).delete(id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+};
 
 const uploadFileToGemini = async (file) => {
   if (!API_KEY) throw new Error("API Key belum di-set.");
+
+  const blob = file instanceof Blob ? file : new Blob([file]);
+  const fileName = file.name || "document";
+  const fileType = file.type || "application/octet-stream";
+  const fileSize = blob.size;
 
   const initResponse = await fetch(`${FILES_API_URL}?key=${API_KEY}`, {
     method: "POST",
     headers: {
       "X-Goog-Upload-Protocol": "resumable",
       "X-Goog-Upload-Command": "start",
-      "X-Goog-Upload-Header-Content-Length": file.size.toString(),
-      "X-Goog-Upload-Header-Content-Type": file.type,
+      "X-Goog-Upload-Header-Content-Length": fileSize.toString(),
+      "X-Goog-Upload-Header-Content-Type": fileType,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ file: { display_name: file.name } }),
+    body: JSON.stringify({ file: { display_name: fileName } }),
   });
 
   if (!initResponse.ok) {
@@ -41,12 +89,12 @@ const uploadFileToGemini = async (file) => {
   const uploadUrl = initResponse.headers.get("x-goog-upload-url");
   if (!uploadUrl) throw new Error("Tidak dapat upload URL dari Gemini.");
 
-  const arrayBuffer = await file.arrayBuffer();
+  const arrayBuffer = await blob.arrayBuffer();
 
   const uploadResponse = await fetch(uploadUrl, {
     method: "POST",
     headers: {
-      "Content-Length": file.size.toString(),
+      "Content-Length": fileSize.toString(),
       "X-Goog-Upload-Offset": "0",
       "X-Goog-Upload-Command": "upload, finalize",
     },
@@ -104,6 +152,7 @@ const App = () => {
   });
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
+  const [isReUploading, setIsReUploading] = useState(false);
   
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -128,6 +177,8 @@ const App = () => {
 
     try {
       const uploaded = await uploadFileToGemini(file);
+      const idbId = `kb_${Date.now()}_${file.name}`;
+      await saveFileToIDB(idbId, file);
       const fileInfo = {
         name: uploaded.name,
         displayName: uploaded.displayName,
@@ -136,6 +187,7 @@ const App = () => {
         sizeBytes: uploaded.sizeBytes,
         expirationTime: uploaded.expirationTime,
         uploadedAt: new Date().toISOString(),
+        idbId,
       };
       saveKnowledgeFiles([...knowledgeFiles, fileInfo]);
     } catch (err) {
@@ -148,8 +200,51 @@ const App = () => {
   const handleKbDelete = async (index) => {
     const file = knowledgeFiles[index];
     await deleteFileFromGemini(file.name);
+    if (file.idbId) {
+      await deleteFileFromIDB(file.idbId).catch(() => {});
+    }
     const updated = knowledgeFiles.filter((_, i) => i !== index);
     saveKnowledgeFiles(updated);
+  };
+
+  const ensureFilesActive = async () => {
+    if (knowledgeFiles.length === 0) return knowledgeFiles;
+    const now = Date.now();
+    let needsUpdate = false;
+    const refreshed = [];
+
+    for (const file of knowledgeFiles) {
+      const expired = file.expirationTime && new Date(file.expirationTime).getTime() <= now;
+      if (!expired) {
+        refreshed.push(file);
+        continue;
+      }
+      if (!file.idbId) {
+        needsUpdate = true;
+        continue;
+      }
+      const stored = await getFileFromIDB(file.idbId).catch(() => null);
+      if (!stored) {
+        needsUpdate = true;
+        continue;
+      }
+      const blob = stored.blob instanceof Blob ? stored.blob : new Blob([stored.blob], { type: stored.type });
+      const reFile = new File([blob], stored.name, { type: stored.type });
+      const uploaded = await uploadFileToGemini(reFile);
+      refreshed.push({
+        ...file,
+        name: uploaded.name,
+        uri: uploaded.uri,
+        expirationTime: uploaded.expirationTime,
+        uploadedAt: new Date().toISOString(),
+      });
+      needsUpdate = true;
+    }
+
+    if (needsUpdate) {
+      saveKnowledgeFiles(refreshed);
+    }
+    return refreshed;
   };
 
   const handleFileChange = (e) => {
@@ -186,8 +281,18 @@ const App = () => {
       throw new Error("API Key belum terdeteksi. Pastikan file .env.local sudah benar, Rief!");
     }
 
-    const kbContext = knowledgeFiles.length > 0
-      ? `\nAnda memiliki akses ke ${knowledgeFiles.length} dokumen referensi yang sudah di-upload oleh user. Gunakan informasi dari dokumen tersebut untuk menjawab pertanyaan.`
+    setIsReUploading(true);
+    let activeFiles;
+    try {
+      activeFiles = await ensureFilesActive();
+    } catch {
+      activeFiles = knowledgeFiles;
+    } finally {
+      setIsReUploading(false);
+    }
+
+    const kbContext = activeFiles.length > 0
+      ? `\nAnda memiliki akses ke ${activeFiles.length} dokumen referensi yang sudah di-upload oleh user. Gunakan informasi dari dokumen tersebut untuk menjawab pertanyaan.`
       : "";
 
     const systemPrompt = `Anda adalah ahli pengadaan (Procurement Expert) hulu migas Indonesia berdasarkan PTK-007 Revisi 05.
@@ -197,7 +302,7 @@ Fokus pada solusi yang sesuai aturan hukum dan pedoman SCM.${kbContext}`;
     let parts = [];
 
     // Tambahkan referensi file Knowledge Base
-    for (const kbFile of knowledgeFiles) {
+    for (const kbFile of activeFiles) {
       parts.push({
         fileData: {
           fileUri: kbFile.uri,
@@ -305,7 +410,7 @@ Fokus pada solusi yang sesuai aturan hukum dan pedoman SCM.${kbContext}`;
               
               {knowledgeFiles.length === 0 && (
                 <p className="text-[11px] text-slate-500 leading-relaxed">
-                  Belum ada dokumen. Upload file PTK-007, Juklak SCM, atau dokumen lain supaya AI bisa merujuk ke sana.
+                  Belum ada dokumen. Upload file sekali — akan tersimpan permanen dan otomatis di-upload ulang ke Gemini kalau expired.
                 </p>
               )}
 
@@ -406,7 +511,7 @@ Fokus pada solusi yang sesuai aturan hukum dan pedoman SCM.${kbContext}`;
                 <Loader2 className="animate-spin text-blue-500" size={18} />
               </div>
               <div className="p-4 bg-slate-900/50 rounded-2xl italic text-xs text-slate-500">
-                Sabar ya Rief, lagi buka-buka jilid PTK-007 nih...
+                {isReUploading ? "Re-upload dokumen expired ke Gemini..." : "Sabar ya Rief, lagi buka-buka jilid PTK-007 nih..."}
               </div>
             </div>
           )}
