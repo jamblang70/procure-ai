@@ -17,7 +17,7 @@ const getApiKey = () => {
 };
 
 const API_KEY = getApiKey(); 
-const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
+const MODEL_NAME = "gemini-2.5-flash";
 
 const App = () => {
   const [messages, setMessages] = useState([
