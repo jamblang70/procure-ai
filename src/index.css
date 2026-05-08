@@ -1,10 +1,10 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-/* Custom Reset & Base Styles 
-  Biar tampilan dasar ProcureAI nggak kaku
-*/
+@theme {
+  --color-brand: #2563eb;
+}
+
+/* Custom Reset & Base Styles */
 @layer base {
   :root {
     color-scheme: dark;
