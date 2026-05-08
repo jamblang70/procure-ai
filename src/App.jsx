@@ -1,16 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
-  Send, Bot, User, FileText, AlertCircle, Loader2, MessageSquare,
-  BookOpen, Settings, RefreshCw, Search, Paperclip, X, FileUp
+  Send, Bot, User, FileText, AlertCircle, Loader2,
+  BookOpen, Settings, Search, Paperclip, X, FileUp, Trash2, Upload
 } from 'lucide-react';
 
-// Solusi untuk error import.meta: 
-// Kita bungkus dalam try-catch atau gunakan pengecekan opsional agar tidak memutus build di env lama.
-// Di project Vite lokal lo, ini akan tetap membaca dari .env.local
 const getApiKey = () => {
   try {
     return import.meta.env.VITE_GEMINI_API_KEY || "";
-  } catch (e) {
+  } catch {
     console.warn("Environment tidak mendukung import.meta.env secara langsung.");
     return "";
   }
@@ -18,12 +15,70 @@ const getApiKey = () => {
 
 const API_KEY = getApiKey(); 
 const MODEL_NAME = "gemini-2.5-flash";
+const FILES_API_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files";
+const STORAGE_KEY = "procureai_knowledge_files";
+
+const uploadFileToGemini = async (file) => {
+  if (!API_KEY) throw new Error("API Key belum di-set.");
+
+  const initResponse = await fetch(`${FILES_API_URL}?key=${API_KEY}`, {
+    method: "POST",
+    headers: {
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": file.size.toString(),
+      "X-Goog-Upload-Header-Content-Type": file.type,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ file: { display_name: file.name } }),
+  });
+
+  if (!initResponse.ok) {
+    const errText = await initResponse.text();
+    throw new Error(`Upload gagal (init): ${errText}`);
+  }
+
+  const uploadUrl = initResponse.headers.get("x-goog-upload-url");
+  if (!uploadUrl) throw new Error("Tidak dapat upload URL dari Gemini.");
+
+  const arrayBuffer = await file.arrayBuffer();
+
+  const uploadResponse = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "Content-Length": file.size.toString(),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: arrayBuffer,
+  });
+
+  if (!uploadResponse.ok) {
+    const errText = await uploadResponse.text();
+    throw new Error(`Upload gagal (finalize): ${errText}`);
+  }
+
+  const result = await uploadResponse.json();
+  return result.file;
+};
+
+const deleteFileFromGemini = async (fileName) => {
+  if (!API_KEY) return;
+  try {
+    await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${API_KEY}`,
+      { method: "DELETE" }
+    );
+  } catch {
+    // File mungkin sudah expired, abaikan error
+  }
+};
 
 const App = () => {
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
-      content: 'Halo Arief! Gue udah dandanin lagi kodenya biar lebih stabil. Sekarang lo bisa lanjut upload screenshot atau nanya kasus pengadaan PTK-007. Ada update apa dari Sadjian Dimsum hari ini? 🥟'
+      content: 'Halo Arief! Sekarang lo bisa upload dokumen PTK-007 atau file pengadaan ke Knowledge Base (sidebar kiri), dan gue bakal otomatis merujuk ke dokumen itu tiap kali lo nanya. Mau mulai dari mana?'
     }
   ]);
   const [input, setInput] = useState('');
@@ -31,13 +86,71 @@ const App = () => {
   const [error, setError] = useState(null);
   const [attachedFile, setAttachedFile] = useState(null);
   const [filePreview, setFilePreview] = useState(null);
+  const [knowledgeFiles, setKnowledgeFiles] = useState(() => {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) return [];
+    try {
+      const parsed = JSON.parse(stored);
+      const now = Date.now();
+      const valid = parsed.filter(f => f.expirationTime && new Date(f.expirationTime).getTime() > now);
+      if (valid.length !== parsed.length) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(valid));
+      }
+      return valid;
+    } catch {
+      localStorage.removeItem(STORAGE_KEY);
+      return [];
+    }
+  });
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
   
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const kbFileInputRef = useRef(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  const saveKnowledgeFiles = (files) => {
+    setKnowledgeFiles(files);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(files));
+  };
+
+  const handleKbUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (kbFileInputRef.current) kbFileInputRef.current.value = '';
+
+    setIsUploading(true);
+    setUploadError(null);
+
+    try {
+      const uploaded = await uploadFileToGemini(file);
+      const fileInfo = {
+        name: uploaded.name,
+        displayName: uploaded.displayName,
+        mimeType: uploaded.mimeType,
+        uri: uploaded.uri,
+        sizeBytes: uploaded.sizeBytes,
+        expirationTime: uploaded.expirationTime,
+        uploadedAt: new Date().toISOString(),
+      };
+      saveKnowledgeFiles([...knowledgeFiles, fileInfo]);
+    } catch (err) {
+      setUploadError(err.message);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleKbDelete = async (index) => {
+    const file = knowledgeFiles[index];
+    await deleteFileFromGemini(file.name);
+    const updated = knowledgeFiles.filter((_, i) => i !== index);
+    saveKnowledgeFiles(updated);
+  };
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
@@ -73,14 +186,27 @@ const App = () => {
       throw new Error("API Key belum terdeteksi. Pastikan file .env.local sudah benar, Rief!");
     }
 
-    const systemPrompt = `
-      Anda adalah ahli pengadaan (Procurement Expert) hulu migas Indonesia berdasarkan PTK-007 Revisi 05.
-      Gaya bahasa: Santai, informatif, panggil user "Arief".
-      Fokus pada solusi yang sesuai aturan hukum dan pedoman SCM.
-    `;
+    const kbContext = knowledgeFiles.length > 0
+      ? `\nAnda memiliki akses ke ${knowledgeFiles.length} dokumen referensi yang sudah di-upload oleh user. Gunakan informasi dari dokumen tersebut untuk menjawab pertanyaan.`
+      : "";
 
-    let parts = [{ text: userQuery || "Analisis file ini berdasarkan pedoman PTK-007." }];
-    
+    const systemPrompt = `Anda adalah ahli pengadaan (Procurement Expert) hulu migas Indonesia berdasarkan PTK-007 Revisi 05.
+Gaya bahasa: Santai, informatif, panggil user "Arief".
+Fokus pada solusi yang sesuai aturan hukum dan pedoman SCM.${kbContext}`;
+
+    let parts = [];
+
+    // Tambahkan referensi file Knowledge Base
+    for (const kbFile of knowledgeFiles) {
+      parts.push({
+        fileData: {
+          fileUri: kbFile.uri,
+          mimeType: kbFile.mimeType,
+        }
+      });
+    }
+
+    // Tambahkan file attachment dari chat (inline image)
     if (file && file.type.startsWith('image/')) {
       const base64Data = await fileToBase64(file);
       parts.push({
@@ -91,8 +217,10 @@ const App = () => {
       });
     }
 
+    parts.push({ text: userQuery || "Analisis file ini berdasarkan pedoman PTK-007." });
+
     const payload = {
-      contents: [{ role: "user", parts: parts }],
+      contents: [{ role: "user", parts }],
       systemInstruction: { parts: [{ text: systemPrompt }] }
     };
 
@@ -144,6 +272,13 @@ const App = () => {
     }
   };
 
+  const formatFileSize = (bytes) => {
+    const num = parseInt(bytes, 10);
+    if (num < 1024) return `${num} B`;
+    if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+    return `${(num / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   return (
     <div className="flex h-screen bg-[#0a0f1e] text-slate-200 font-sans overflow-hidden">
       {/* Sidebar UI */}
@@ -158,21 +293,70 @@ const App = () => {
           <div className="h-1 w-12 bg-blue-600 rounded-full mb-6"></div>
         </div>
 
-        <div className="flex-1 px-6 space-y-6">
-          <div className="space-y-4">
-            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-2">Library</p>
-            <div className="p-4 bg-white/5 rounded-2xl border border-white/5 hover:bg-white/10 transition-all cursor-default group">
-              <h2 className="text-xs font-bold mb-2 flex items-center gap-2 text-blue-400">
-                <BookOpen size={14} /> Knowledge Base
+        <div className="flex-1 px-6 space-y-6 overflow-y-auto custom-scrollbar">
+          {/* Knowledge Base Section */}
+          <div className="space-y-3">
+            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-2">Knowledge Base</p>
+            
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-3">
+              <h2 className="text-xs font-bold flex items-center gap-2 text-blue-400">
+                <BookOpen size={14} /> Dokumen Referensi
               </h2>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                Database PTK-007 Rev 05 & Juklak SCM Terbaru 2024/2025 sudah aktif.
-              </p>
+              
+              {knowledgeFiles.length === 0 && (
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Belum ada dokumen. Upload file PTK-007, Juklak SCM, atau dokumen lain supaya AI bisa merujuk ke sana.
+                </p>
+              )}
+
+              {knowledgeFiles.map((file, idx) => (
+                <div key={idx} className="flex items-center gap-2 p-2 bg-white/5 rounded-xl group">
+                  <FileText size={14} className="text-blue-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] font-bold text-slate-300 truncate">{file.displayName}</p>
+                    <p className="text-[9px] text-slate-500">{formatFileSize(file.sizeBytes)}</p>
+                  </div>
+                  <button
+                    onClick={() => handleKbDelete(idx)}
+                    className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-all p-1"
+                    title="Hapus dokumen"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+
+              {uploadError && (
+                <p className="text-[10px] text-red-400 bg-red-500/10 p-2 rounded-lg">{uploadError}</p>
+              )}
+
+              <button
+                onClick={() => kbFileInputRef.current?.click()}
+                disabled={isUploading}
+                className="w-full flex items-center justify-center gap-2 p-3 border border-dashed border-white/10 rounded-xl text-[11px] font-bold text-slate-400 hover:text-blue-400 hover:border-blue-500/30 hover:bg-blue-500/5 transition-all disabled:opacity-50"
+              >
+                {isUploading ? (
+                  <><Loader2 size={14} className="animate-spin" /> Uploading...</>
+                ) : (
+                  <><Upload size={14} /> Upload Dokumen</>
+                )}
+              </button>
+              <input
+                type="file"
+                ref={kbFileInputRef}
+                onChange={handleKbUpload}
+                accept=".pdf,.doc,.docx,.txt,.csv,.xls,.xlsx,.png,.jpg,.jpeg"
+                className="hidden"
+              />
             </div>
           </div>
           
           <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-blue-500/10 border border-white/5">
-            <h3 className="text-[11px] font-bold text-emerald-400 mb-1">Status: Operational</h3>
+            <h3 className="text-[11px] font-bold text-emerald-400 mb-1">
+              {knowledgeFiles.length > 0 
+                ? `${knowledgeFiles.length} dokumen aktif` 
+                : "Status: Siap"}
+            </h3>
             <p className="text-[10px] text-slate-500 italic">"Cerdas dalam Audit, Tangkas dalam Tender."</p>
           </div>
         </div>
@@ -198,7 +382,7 @@ const App = () => {
         {/* Chat History */}
         <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-8 custom-scrollbar">
           {messages.map((msg, idx) => (
-            <div key={idx} className={`flex gap-4 md:gap-6 ${msg.role === 'user' ? 'flex-row-reverse' : ''} animate-in fade-in slide-in-from-bottom-4 duration-500`}>
+            <div key={idx} className={`flex gap-4 md:gap-6 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
               <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 shadow-xl ${
                 msg.role === 'assistant' ? 'bg-blue-600 text-white shadow-blue-500/20' : 'bg-slate-800 text-blue-400 border border-slate-700'
               }`}>
@@ -240,7 +424,7 @@ const App = () => {
         <div className="p-6 md:p-10 bg-gradient-to-t from-[#0a0f1e] to-transparent">
           <div className="max-w-4xl mx-auto">
             {filePreview && (
-              <div className="mb-4 flex items-center gap-3 p-3 bg-blue-600/10 border border-blue-500/20 rounded-2xl animate-in zoom-in duration-200">
+              <div className="mb-4 flex items-center gap-3 p-3 bg-blue-600/10 border border-blue-500/20 rounded-2xl">
                 <div className="relative">
                   {filePreview === 'document' ? (
                     <div className="w-12 h-12 bg-slate-800 rounded-lg flex items-center justify-center"><FileUp size={24} className="text-blue-400" /></div>
@@ -283,7 +467,7 @@ const App = () => {
                 <Send size={20} />
               </button>
             </div>
-            <p className="text-center text-[10px] text-slate-700 mt-4 font-black uppercase tracking-[0.3em]">SCM Analytics Engine v1.6</p>
+            <p className="text-center text-[10px] text-slate-700 mt-4 font-black uppercase tracking-[0.3em]">SCM Analytics Engine v2.0</p>
           </div>
         </div>
       </div>
