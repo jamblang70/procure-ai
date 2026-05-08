@@ -2,6 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Custom Reset & Base Styles 
+  Biar tampilan dasar ProcureAI nggak kaku
+*/
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  
+  body {
+    @apply antialiased text-slate-200 bg-[#020617];
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
 /* Custom scrollbar biar aplikasi ProcureAI makin ganteng */
 ::-webkit-scrollbar {
   width: 6px;
@@ -12,18 +26,25 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: #1e293b;
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: #334155;
 }
 
-body {
+/* Fix untuk Mobile Viewport di Vercel */
+html, body {
+  height: 100%;
+  width: 100%;
+  overflow-x: hidden;
   margin: 0;
   padding: 0;
-  background-color: #020617; /* slate-950 */
-  color: #f1f5f9;
-  -webkit-font-smoothing: antialiased;
+}
+
+/* Animasi Smooth */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #1e293b #0f172a;
 }
