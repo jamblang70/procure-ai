@@ -110,25 +110,6 @@ async def delete_from_gemini(file_name: str):
         pass
 
 
-async def ensure_gemini_active(file_info: dict) -> dict:
-    expiration = file_info.get("gemini_expiration")
-    if expiration and time.time() * 1000 < (expiration * 1000 if expiration < 1e12 else expiration):
-        return file_info
-
-    local_path = Path(file_info["local_path"])
-    if not local_path.exists():
-        return file_info
-
-    uploaded = await upload_to_gemini(
-        local_path, file_info["display_name"], file_info["mime_type"]
-    )
-    file_info["gemini_name"] = uploaded.get("name", "")
-    file_info["gemini_uri"] = uploaded.get("uri", "")
-    file_info["gemini_expiration"] = uploaded.get("expirationTime", "")
-    save_db(load_db())
-    return file_info
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -186,7 +167,11 @@ async def upload_file(file: UploadFile = File(...)):
 
     size_bytes = local_path.stat().st_size
 
-    uploaded = await upload_to_gemini(local_path, file.filename or "document", file.content_type)
+    try:
+        uploaded = await upload_to_gemini(local_path, file.filename or "document", file.content_type)
+    except Exception:
+        local_path.unlink(missing_ok=True)
+        raise
 
     file_info = {
         "id": file_id,
