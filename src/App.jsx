@@ -4,7 +4,7 @@ import {
   BookOpen, Settings, Search, Paperclip, X, FileUp, Trash2, Upload
 } from 'lucide-react';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:8899";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://api.siswandana.web.id";
 const SUPPORTED_EXTENSIONS = ".pdf,.txt,.csv,.html,.md,.png,.jpg,.jpeg,.webp";
 
 const App = () => {
